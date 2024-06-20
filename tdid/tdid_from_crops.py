@@ -17,7 +17,13 @@ default_transform = Compose([ToTensor(), PadToSquare(), Resize(21*32)])
 
 
 class TDIDFromCrops(TDID):
-    def __init__(self, model, prompt: DetectObjectPrompt, img_encoder, embedding_aggregator, margin=5, img_transform=default_transform, augmentations=False):
+    def __init__(self, model,
+                 prompt: DetectObjectPrompt,
+                 img_encoder,
+                 embedding_aggregator,
+                 margin=5,
+                 img_transform=default_transform,
+                 augmentations=False):
         self.embeddings = defaultdict(list)
         self.model = model
         self.prompt = prompt
@@ -125,11 +131,11 @@ class TDIDFromCrops(TDID):
         keys = sorted(self.embeddings.keys())
         return torch.stack([self.get_embedding(k) for k in keys])
 
-    def predict_from_tensor(self, x, use_bias=False):
+    def predict_from_tensor(self, x, use_correction=False):
         x = x.to(self.model.device)
         emb_targets = self.get_embeddings()
         out = self.model(x, emb_targets)
-        if use_bias:
+        if use_correction:
             out = out - torch.nn.functional.pad(self.bias, (4, 0), value=0.0)[None, :, None]
         return out
     
@@ -141,7 +147,7 @@ class TDIDFromCrops(TDID):
 
     def predict(self, im, use_bias=False):
         x = self.img_transform(im).unsqueeze(0)
-        return self.predict_from_tensor(x, use_bias=use_bias)
+        return self.predict_from_tensor(x, use_correction=use_bias)
 
     def predict_independent(self, im):
         x = self.img_transform(im).unsqueeze(0)
