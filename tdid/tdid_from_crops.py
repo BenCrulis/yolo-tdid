@@ -23,7 +23,9 @@ class TDIDFromCrops(TDID):
                  embedding_aggregator,
                  margin=5,
                  img_transform=default_transform,
-                 augmentations=False):
+                 augmentations=False,
+                 WC_data=None,
+                 ):
         self.embeddings = defaultdict(list)
         self.model = model
         self.prompt = prompt
@@ -34,6 +36,10 @@ class TDIDFromCrops(TDID):
         self.augmentations = augmentations
 
         self.debias_normalization = False
+
+        self.W_whitening, self.W_coloring, self.w_bias, self.c_bias = None, None, None, None
+        if WC_data is not None:
+            self.W_whitening, self.W_coloring, self.w_bias, self.c_bias = WC_data
 
         # save training data outputs
         self.train_outputs = None
@@ -57,7 +63,13 @@ class TDIDFromCrops(TDID):
         
         batch = torch.stack(batch, dim=0)
 
-        emb = self.img_encoder(batch)
+        emb = self.img_encoder(batch).float()
+
+        if self.W_whitening is not None:
+            emb = emb / emb.norm(p=2, dim=-1, keepdim=True)
+            emb = (emb - self.w_bias) @ (self.W_whitening @ self.W_coloring)
+            emb = emb + self.c_bias
+
         l = self.embeddings[y]
         for e in emb:
             l.append(e)
@@ -117,11 +129,13 @@ class TDIDFromCrops(TDID):
             self.norm_factors = {i: self.norm_factors[classes.index(i)] for i in classes}
             return
         # self.norm_factors = normalize(embeddings, dim=-1)
-        self.norm_factors = embeddings.norm(dim=-1)
+        self.norm_factors = embeddings.norm(p=2, dim=-1)
         self.norm_factors = {i: self.norm_factors[classes.index(i)] for i in classes}
         pass
     
     def _normalize_embeddings(self, x, y):
+        if self.W_whitening is not None: # if whitening and coloring is used, normalization happen before whitening
+            return x
         return x / self.norm_factors[y]
 
     def get_embedding(self, y):

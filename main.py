@@ -45,6 +45,7 @@ def stratified_sampler(idx, class_idx, k):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Evaluation on TEgO')
+    parser.add_argument('--out', type=Path, default=Path("results"), help='where to put results')
     parser.add_argument('-r', '--repeat', type=int, default=1, help='Number of repetitions of the experiment')
     parser.add_argument('-n', type=int, default=10, help='Number of objects to evaluate')
     parser.add_argument('-k', type=int, default=5, help='Number of images per object')
@@ -61,6 +62,12 @@ def parse_args():
     parser.add_argument('--margin', type=int, default=15, help='Margin for cropping')
     parser.add_argument('--use-bias', action='store_true', help="Use bias in prediction")
     parser.add_argument('--augment', action='store_true', help="Use augmentations")
+
+    # whitening and coloring
+    parser.add_argument('--wc', action='store_true', help="Use whitening and coloring")
+    parser.add_argument('--whitening-data', default="coco_train_embeddings.pt", type=Path, help="Whitening data")
+    parser.add_argument('--coloring-data', default="imagenet_txt_embeddings.pt", type=Path, help="Coloring data")
+
     parser.add_argument('--dry', action='store_true', help="dry run (don't save anything)")
     parser.add_argument('--cpu', action='store_true', help='Use CPU')
     parser.add_argument('--seed', type=int, default=None, help='Random seed')
@@ -76,13 +83,50 @@ def resolve_tego_path(args):
         return args.tego
 
 
-def evaluate(tego_root, seed, repeats=1, yolo_model_size="s", margin=5, sighted_data=True, clutter=True, hand=True,
-             n_obj=10, k=5, use_bias=False, augment=False, independent_predictions=False, dry=False, force_cpu=False):
-    N_CLASSES = 19
-    device = torch.device("cuda:0" if torch.cuda.is_available() and not force_cpu else "cpu")
-    print("Using device", device)
+def get_whitening_and_coloring_matrices(args, device="cpu"):
+    if args.wc is None or not args.wc:
+        return None, None
+    
+    from utils.whitening import whitening_matrix, coloring_matrix
 
-    run_name = f"yolow-{yolo_model_size}_sighted-{sighted_data}_clutter-{clutter}_hand-{hand}_n-{n_obj}_k-{k}_bias-{use_bias}_augment-{augment}_seed-{seed}"
+    print("Loading whitening and coloring data")
+    print(f"Opening {args.whitening_data}")
+    with open(args.whitening_data, "rb") as f:
+        whitening_data = torch.load(f, map_location=device).float()
+    
+    print(f"Opening {args.coloring_data}")
+    with open(args.coloring_data, "rb") as f:
+        coloring_data = torch.load(f, map_location=device).float()
+
+    whitening_data_n = whitening_data / whitening_data.norm(p=2, dim=-1, keepdim=True)
+    coloring_data_n = coloring_data / coloring_data.norm(p=2, dim=-1, keepdim=True)
+    
+    print("Computing whitening and coloring matrices")
+    W_whitening = whitening_matrix(whitening_data_n)
+
+    target_centered = coloring_data_n - torch.mean(coloring_data_n, axis=0)
+    target_cov_matrix = torch.cov(target_centered.T)
+    W_coloring = coloring_matrix(target_cov_matrix)
+
+    w_bias = whitening_data_n.mean(axis=0)
+    c_bias = coloring_data_n.mean(axis=0)
+
+    # temporary test
+    # W_whitening = torch.eye(W_whitening.shape[0], device=device)
+    # W_coloring = torch.eye(W_coloring.shape[0], device=device)
+
+    return (W_whitening, W_coloring, w_bias, c_bias)
+
+
+def evaluate(tego_root, seed, out_path=Path("results"), repeats=1, yolo_model_size="s", margin=5, sighted_data=True, clutter=True, hand=True,
+             n_obj=10, k=5, use_bias=False, augment=False, independent_predictions=False, dry=False, device="cpu",
+             WC_data=None):
+    N_CLASSES = 19
+
+    use_wc = WC_data is not None
+
+    run_name = f"yolow-{yolo_model_size}_sighted-{sighted_data}_clutter-{clutter}_hand-{hand}_n-{n_obj}_k-{k}_bias-{use_bias}"\
+               f"_augment-{augment}_use_wc-{use_wc}_seed-{seed}"
     
     model = YoloWModel(model_size=yolo_model_size, scale=21, device=device)
 
@@ -98,7 +142,6 @@ def evaluate(tego_root, seed, repeats=1, yolo_model_size="s", margin=5, sighted_
     class_idx = np.unique(tego_ds.class_idx)
     print(f"{len(class_idx)} classes in dataset")
 
-    out_path = Path("results")
     if not dry:
         out_path.mkdir(exist_ok=True, parents=True)
         print(f"will write to {out_path / run_name}.csv")
@@ -107,6 +150,8 @@ def evaluate(tego_root, seed, repeats=1, yolo_model_size="s", margin=5, sighted_
         csv_writer.writerow(["repeat", "seed", "hand", "blind", "illuminated", "torch", "volume_portrait", "clutter",
                             "target_class", "predicted_class", "predicted_prob", "correct"] + [f"prob_cls_{i}" for i in range(N_CLASSES)])
         file.flush()
+    else:
+        print(f"Would have written to {out_path / run_name}.csv if not dry run")
 
     for it in range(1, repeats+1):
         print(f"iteration {it}/{repeats}")
@@ -148,7 +193,9 @@ def evaluate(tego_root, seed, repeats=1, yolo_model_size="s", margin=5, sighted_
 
         tdid = TDIDFromCrops(model, main_object_prompt(model, txt_enc, device), img_enc, average_embeddings,
                              margin=margin,
-                             augmentations=augment)
+                             augmentations=augment,
+                             WC_data=WC_data,
+                             )
 
         print("saving objects in model")
         tdid.save_objects(tego_train)
@@ -246,16 +293,24 @@ def main():
     augment = args.augment
     dry = args.dry
 
+    out_path = args.out
+
     seed = args.seed
     if seed is None:
         seed = random.randint(0, 1000000)
+    
+    device = torch.device("cuda:0" if torch.cuda.is_available() and not args.cpu else "cpu")
+    print("Using device", device)
 
     independent_predictions = False
 
     tego_root = resolve_tego_path(args)
 
+    WC_data = get_whitening_and_coloring_matrices(args, device=device)
+
     evaluate(
         tego_root,
+        out_path=out_path,
         repeats=n_repeats,
         seed=seed,
         yolo_model_size=yolo_model_size,
@@ -268,7 +323,9 @@ def main():
         use_bias=use_bias,
         augment=augment,
         dry=dry,
-        force_cpu=args.cpu)
+        device=device,
+        WC_data=WC_data,
+    )
     print("end")
 
 

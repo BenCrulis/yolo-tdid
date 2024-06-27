@@ -19,7 +19,7 @@ do
         for n_training_examples in "${number_of_training_examples[@]}"
         do
             echo "model_size: $model_size, n_object: $n_object, n_training_examples: $n_training_examples"
-            python3 main.py --yolo-size $model_size -n $n_object -k $n_training_examples -r $n_repeats $common_args
+            python3 main.py --yolo-size $model_size -n $n_object -k $n_training_examples -r $n_repeats $common_args $@
         done
     done
 done
