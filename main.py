@@ -66,7 +66,7 @@ def parse_args():
     # whitening and coloring
     parser.add_argument('--wc', action='store_true', help="Use whitening and coloring")
     parser.add_argument('--whitening-data', default="coco_train_embeddings.pt", type=Path, help="Whitening data")
-    parser.add_argument('--coloring-data', default="imagenet_txt_embeddings.pt", type=Path, help="Coloring data")
+    parser.add_argument('--coloring-data', default="gqa_txt_embeddings.pt", type=Path, help="Coloring data")
 
     parser.add_argument('--dry', action='store_true', help="dry run (don't save anything)")
     parser.add_argument('--cpu', action='store_true', help='Use CPU')
@@ -102,13 +102,12 @@ def get_whitening_and_coloring_matrices(args, device="cpu"):
     coloring_data_n = coloring_data / coloring_data.norm(p=2, dim=-1, keepdim=True)
     
     print("Computing whitening and coloring matrices")
-    W_whitening = whitening_matrix(whitening_data_n)
+    W_whitening = whitening_matrix(whitening_data_n, eps=1e-4) # apprently, epsilon is very important
 
-    target_centered = coloring_data_n - torch.mean(coloring_data_n, axis=0)
-    target_cov_matrix = torch.cov(target_centered.T)
+    target_cov_matrix = torch.cov(coloring_data_n.T)
     W_coloring = coloring_matrix(target_cov_matrix)
 
-    w_bias = whitening_data_n.mean(axis=0)
+    w_bias = whitening_data_n.mean(axis=0)  # assume zero bias in the embeddings in order to preserve angles
     c_bias = coloring_data_n.mean(axis=0)
 
     # temporary test

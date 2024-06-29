@@ -24,6 +24,6 @@ echo "sending to: $dst"
 
 
 # Send the file to the blois server
-rsync -zrtv --exclude '*.pyc' --exclude 'tego_embeddings*.pt' --exclude '*.png' --exclude '*.jpg'\
+rsync -zrtv --exclude '*.pyc' --exclude '*embeddings*.pt' --exlucde '*.csv* --exclude '*.png' --exclude '*.jpg'\
     --exclude tego_crops --exclude venv --exclude wandb . "$dst"
 
