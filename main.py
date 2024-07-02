@@ -22,6 +22,7 @@ from models.yolow.utils import get_yolow_clip, get_clip_encoders
 
 from utils.nms import non_max_suppression2
 from utils.pytorch import seed_everything
+from utils.whitening import get_whitening_and_coloring_matrices
 
 from tdid.prompts import DetectObjectPrompt, object_in_hand_prompt, main_object_prompt
 from tdid.tdid_from_crops import TDIDFromCrops
@@ -81,40 +82,6 @@ def resolve_tego_path(args):
         return Path(os.environ["TEGO_ROOT"])
     else:
         return args.tego
-
-
-def get_whitening_and_coloring_matrices(args, device="cpu"):
-    if args.wc is None or not args.wc:
-        return None, None
-    
-    from utils.whitening import whitening_matrix, coloring_matrix
-
-    print("Loading whitening and coloring data")
-    print(f"Opening {args.whitening_data}")
-    with open(args.whitening_data, "rb") as f:
-        whitening_data = torch.load(f, map_location=device).float()
-    
-    print(f"Opening {args.coloring_data}")
-    with open(args.coloring_data, "rb") as f:
-        coloring_data = torch.load(f, map_location=device).float()
-
-    whitening_data_n = whitening_data / whitening_data.norm(p=2, dim=-1, keepdim=True)
-    coloring_data_n = coloring_data / coloring_data.norm(p=2, dim=-1, keepdim=True)
-    
-    print("Computing whitening and coloring matrices")
-    W_whitening = whitening_matrix(whitening_data_n, eps=1e-4) # apprently, epsilon is very important
-
-    target_cov_matrix = torch.cov(coloring_data_n.T)
-    W_coloring = coloring_matrix(target_cov_matrix)
-
-    w_bias = whitening_data_n.mean(axis=0)  # assume zero bias in the embeddings in order to preserve angles
-    c_bias = coloring_data_n.mean(axis=0)
-
-    # temporary test
-    # W_whitening = torch.eye(W_whitening.shape[0], device=device)
-    # W_coloring = torch.eye(W_coloring.shape[0], device=device)
-
-    return (W_whitening, W_coloring, w_bias, c_bias)
 
 
 def evaluate(tego_root, seed, out_path=Path("results"), repeats=1, yolo_model_size="s", margin=5, sighted_data=True, clutter=True, hand=True,

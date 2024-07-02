@@ -15,14 +15,22 @@ from avalanche.training.plugins import EvaluationPlugin
 from continual.benchmarks.core50_fs import CORe50_fs, CORe50_fs_bbox
 from continual.detect_and_crop import DetectCropSave
 
-from continual.plugins.saved_objects import SavedObjectCountPluginMetric
+from continual.plugins.saved_objects import SavedObjectCountPluginMetric, SeenObjectCountPluginMetric
+from continual.plugins.training_time import TrainTime
+
+from utils.whitening import get_whitening_and_coloring_matrices
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Continual learning with CORe50')
     parser.add_argument('--wandb', action='store_true', help='Use wandb for logging')
     parser.add_argument('--fsCore50', action='store_true', help='Use full size CORe50')
+
     parser.add_argument('--strategy', default="detectAndCrop", help='One of {naive,ar1,detectAndCrop}')
+    parser.add_argument('--wc', action='store_true', help="use whitening and coloring")
+    parser.add_argument('--whitening-data', default="coco_train_embeddings.pt", type=Path, help="Whitening data")
+    parser.add_argument('--coloring-data', default="gqa_txt_embeddings.pt", type=Path, help="Coloring data")
+
     parser.add_argument('--yolo-size', default="s", help='One of {s,m,l} default to s')
     parser.add_argument('--store', default="avg", help='One of {avg,first,last,largest,most_likely,exp_avg,exp_weighted_avg} default to avg')
     parser.add_argument('--min-prob', type=float, default=0.01, help='Minimum probability for detection')
@@ -52,12 +60,15 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() and not args.cpu else "cpu")
     print("Using device", device)
 
+    WC_data = get_whitening_and_coloring_matrices(args, device=device)
+
     detectAndCropParams = {
         "store": store,
         "min_prob": args.min_prob,
         "margin": args.margin,
         "augmentations": args.augment,
         "alpha": args.alpha,
+        "wc_data": WC_data,
     }
 
     normalize_Core50 = False  # YOLO-World doesn't seem to need input image normalization
@@ -66,7 +77,7 @@ if __name__ == "__main__":
         from torchvision.transforms import Compose, ToTensor
 
         benchmark_fn = CORe50_fs
-        if gt_bbox:
+        if gt_bbox and strategy != "ar1":
             benchmark_fn = CORe50_fs_bbox
 
         min_obj_size = 30
@@ -124,7 +135,9 @@ if __name__ == "__main__":
         timing_metrics(epoch=True),
         forgetting_metrics(experience=True, stream=True),
         *([confusion_matrix_metrics(n_classes)] if n_classes <= 150 else []),
-        SavedObjectCountPluginMetric(reset_at='never', emit_at='iteration', mode='train'),
+        SavedObjectCountPluginMetric(reset_at="never", emit_at="iteration", mode="train"),
+        SeenObjectCountPluginMetric(reset_at="never", emit_at="iteration", mode="train"),
+        TrainTime(),
         #LogPlugin.get_instance(),
         loggers=loggers,
         # benchmark=benchmark

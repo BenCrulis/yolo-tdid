@@ -104,6 +104,7 @@ class DetectCropSave(SupervisedTemplate):
         min_prob=0.0,
         margin=5,
         augmentations=False,
+        wc_data=None,
         alpha=None,
         criterion: CriterionType = CrossEntropyLoss(),
         train_mb_size: int = 1,
@@ -170,6 +171,7 @@ class DetectCropSave(SupervisedTemplate):
         self.margin = margin
         self.crop_to_square = True
         self.augmentations = augmentations
+        self.wc_data = wc_data
         self.alpha = alpha
 
         with torch.inference_mode():
@@ -268,12 +270,12 @@ class DetectCropSave(SupervisedTemplate):
             feat = self.feats.get(y, None)
             if feat is None:
                 return None
-            return sum([normalize(x[1], dim=-1) for x in feat.values()]) / len(feat)
+            return sum([x[1] for x in feat.values()]) / len(feat)
         elif self.store == "exp_weighted_avg":
             feat = self.feats.get(y, None)
             if feat is None:
                 return None
-            return sum([normalize(x[1], dim=-1) for x in feat.values()]) / sum([x[0] for x in feat.values()])
+            return sum([x[1] for x in feat.values()]) / sum([x[0] for x in feat.values()])
         elif self.store == "exp_medoid":
             feat = self.feats.get(y, None)
             if feat is None:
@@ -299,12 +301,21 @@ class DetectCropSave(SupervisedTemplate):
         batch = [cropped]
         if self.augmentations:
             batch.append(torch.flip(cropped, [2]))
-            rotated90 = torch.rot90(cropped, 1, [1, 2])
+            rotated90 = torch.rot90(cropped, 1, [-2, -1])
             batch.append(rotated90)
-            rotated90anti = torch.rot90(cropped, -1, [1, 2])
+            rotated90anti = torch.rot90(cropped, -1, [-2, -1])
             batch.append(rotated90anti)
-        embs = [self.img_encoder(x.unsqueeze(0))[0] for x in batch]
+        embs = [self._compute_embedding(x)[0] for x in batch]
         return torch.stack(embs, dim=0)
+
+    def _compute_embedding(self, x):
+        emb = self.img_encoder(x)
+        emb = normalize(emb, dim=-1)
+        if self.wc_data is not None:
+            W_w, W_c, bias_w, bias_c = self.wc_data
+            emb = (emb - bias_w) @ (W_w @ W_c)
+            emb = emb + bias_c
+        return emb
 
     def _update_object_representation(self, x, y, nms):
         y = ensure_int(y)
@@ -326,10 +337,10 @@ class DetectCropSave(SupervisedTemplate):
         
         if self.store == "first":
             if feat is None:
-                feat = self.img_encoder(cropped_x.unsqueeze(0))[0]
+                feat = self._process_crop(cropped_x.unsqueeze(0))[0]
                 self.feats[y] = feat
         elif self.store == "last":
-            feat = self.img_encoder(cropped_x.unsqueeze(0))[0]
+            feat = self._process_crop(cropped_x.unsqueeze(0))[0]
             self.feats[y] = feat
         elif self.store == "avg":
             if feat is None:
@@ -337,7 +348,7 @@ class DetectCropSave(SupervisedTemplate):
                 self.feats[y] = feat
             n, s = feat
             # s += self.img_encoder(cropped_x.unsqueeze(0))[0]
-            processed = self._process_crop(cropped_x)
+            processed = self._process_crop(cropped_x.unsqueeze(0))
             s += processed.sum(0)
             n += processed.shape[0]
             self.feats[y] = (n, s)
@@ -353,7 +364,7 @@ class DetectCropSave(SupervisedTemplate):
             prob, emb = exp_data
 
             if detection_prob > prob:
-                new_exp_data = (detection_prob, self.img_encoder(cropped_x.unsqueeze(0))[0])
+                new_exp_data = (detection_prob, self._process_crop(cropped_x.unsqueeze(0))[0])
                 feat[exp_id] = new_exp_data
             pass
         elif self.store == "most_likely":
@@ -362,7 +373,7 @@ class DetectCropSave(SupervisedTemplate):
                 self.feats[y] = feat
             prob, s = feat
             if detection_prob > prob:
-                feat = (detection_prob, self.img_encoder(cropped_x.unsqueeze(0))[0])
+                feat = (detection_prob, self._process_crop(cropped_x.unsqueeze(0))[0])
                 self.feats[y] = feat
         else:
             raise ValueError(f"Unknown store method: {self.store}")
@@ -443,33 +454,29 @@ class DetectCropSave(SupervisedTemplate):
                     self._update_known_classes()
                     known_classes_elapsed = time.time() - bef_updating_classes
 
-                    self._before_forward(**kwargs)
                     self.model.eval()
 
+                    self._before_update(**kwargs)
                     bef_update_objects = time.time()
                     self._detect_object(self.mb_x)
-                    bef_forward = time.time()
+                    aft_update_objects = time.time()
+                    self.train_time = aft_update_objects - bef_update_objects
+                    self._after_update(**kwargs)
                     
                     can_infer = len(self.feats) > 0
+
+                    self._before_forward(**kwargs)
 
                     if can_infer:
                         self.forward(training=True)
                     else:
                         self.mb_output = torch.zeros((1, 1), device=self.device)
 
-                    detect_object_elapsed =  bef_forward - bef_update_objects
-                    forward_elapsed = time.time() - bef_forward
                     self._after_forward(**kwargs)
 
                 # Loss
                 if can_infer:
                     self.loss += self.criterion()
-
-                    # Optimization step
-                    self._before_update(**kwargs)
-                    # there is no optimizer update in this template
-                    self._after_update(**kwargs)
-
                     self._after_training_iteration(**kwargs)
                 pass
             except OSError as e:
